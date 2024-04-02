@@ -1,95 +1,63 @@
-# require 'json'
+require 'json'
 
-# class Handler
-#   VALIDATION_ERRORS = [
-#     PG::InvalidTextRepresentation,
-#     PG::StringDataRightTruncation,
-#     Transaction::InvalidDataError,
-#     Transaction::InvalidLimitAmountError
-#   ].freeze
+require_relative 'bank_statement'
+require_relative 'transaction'
 
-#   def self.call(*args)
-#     new(*args).handle
-#   end
+class Handler
+  VALIDATION_ERRORS = [
+    PG::InvalidTextRepresentation,
+    PG::StringDataRightTruncation,
+    Transaction::InvalidDataError,
+    Transaction::InvalidLimitAmountError
+  ].freeze
 
-#   def initialize(client)
-#     @client = client
-#   end
 
-#   def handle
-#     begin
-#       ########## Request ##########
-#       #############################
-#       message = ''
-#       headers = {}
-#       params = {}
+  def self.call(*args)
+    new(*args).handle
+  end
 
-#       if (line = @client.gets)
-#         message += line
+  def initialize(client)
+    @client = client
+  end
 
-#         headline_regex = /^(GET|POST)\s\/clientes\/(\d+)\/(.*?)\sHTTP.*?$/
-#         verb, id, action = line.match(headline_regex).captures
-#         params['id'] = id
-#         request = "#{verb} /clientes/:id/#{action}"
-#       end
+  def handle
+    begin
+      ########## Request ##########
+      request, params = Request.parse(@client)
 
-#       puts "\n[#{Time.now}] #{message}"
+      ########## Response ##########
+      status = nil
+      body = '{}'
 
-#       while (line = @client.gets)
-#         break if line == "\r\n"
+      case request
+      in "GET /clientes/:id/extrato"
+        status = 200
+        body = BankStatement.call(params['id']).to_json
 
-#         header, value = line.split(': ')
-#         headers[header] = value.chomp
+      in "POST /clientes/:id/transacoes"
+        status = 200
+        body = Transaction.call(
+          params['id'],
+          params['valor'],
+          params['tipo'],
+          params['descricao']
+        ).to_json
 
-#         message += line
-#       end
+      else
+        raise NotFoundError
+      end
+    rescue PG::ForeignKeyViolation, BankStatement::NotFoundError, Transaction::NotFoundError
+      status = 404
+    rescue *VALIDATION_ERRORS => err
+      status = 422
+      body = { error: err.message }.to_json
+    end
 
-#       if headers['Content-Length']
-#         body_size = headers['Content-Length'].to_i
-#         body = @client.read(body_size)
+    response(@client, body, status)
+  end
 
-#         params.merge!(JSON.parse(body))
-#       end
-
-#       ########## Response ##########
-#       ##############################
-
-#       status = nil
-#       body = '{}'
-
-#       case request
-#       in "GET /clientes/:id/extrato"
-#         body = BankStatement.call(params['id']).to_json
-
-#         status = 200
-#       in "POST /clientes/:id/transacoes"
-#         body = Transaction.call(
-#           params['id'],
-#           params['valor'],
-#           params['tipo'],
-#           params['descricao']
-#         ).to_json
-
-#         status = 200
-#       else
-#         status = 404
-#       end
-#     rescue PG::ForeignKeyViolation,
-#            BankStatement::NotFoundError,
-#            Transaction::NotFoundError
-#       status = 404
-#     rescue *VALIDATION_ERRORS => err
-#       status = 422
-#       body = { error: err.message }.to_json
-#     end
-
-#     response = <<~HTTP
-#       HTTP/2.0 #{status}
-#       Content-Type: application/json
-
-#       #{body}
-#     HTTP
-
-#     @client.puts(response)
-#   end
-# end
+  def response(cliente, body, status)
+    cliente.puts "HTTP/1.1 #{status}\r\nContent-Type: application/json\r\n\r\n#{body}"
+    cliente.close
+  end
+end
